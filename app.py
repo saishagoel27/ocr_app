@@ -10,6 +10,7 @@ from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import AzureError
 import io
+import google.generativeai as genai
 
 # Load environment variables
 load_dotenv()
@@ -17,6 +18,9 @@ load_dotenv()
 # Azure Document Intelligence configuration
 AZURE_ENDPOINT = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT")
 AZURE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY")
+
+# Gemini AI configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Database configuration
 DATABASE_NAME = "financial_docs.db"
@@ -31,21 +35,35 @@ except Exception as e:
     st.error(f"Failed to initialize Azure client: {e}")
     document_client = None
 
+# Initialize Gemini AI
+try:
+    if GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    else:
+        gemini_model = None
+        st.warning("Gemini API key not found. Chat functionality will be disabled.")
+except Exception as e:
+    st.error(f"Failed to initialize Gemini AI: {e}")
+    gemini_model = None
+
 # Streamlit page configuration
 st.set_page_config(
-    page_title="Financial Document Processor",
+    page_title="Financial Document Processor with AI Chat",
     page_icon="📄",
     layout="wide"
 )
 
-st.title("📄 Financial Document Processor")
-st.write("Upload your financial documents (PDF, JPG, PNG) to extract key information using Azure AI!")
+st.title("📄 Financial Document Processor with AI Chat")
+st.write("Upload your financial documents (PDF, JPG, PNG) to extract key information using Azure AI and chat with them using Gemini!")
 
-# Initialize session state for storing processing results
+# Initialize session state
 if 'processing_result' not in st.session_state:
     st.session_state.processing_result = None
-if 'save_clicked' not in st.session_state:
-    st.session_state.save_clicked = False
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+if 'current_document_context' not in st.session_state:
+    st.session_state.current_document_context = None
 
 # Database functions
 def init_database():
@@ -89,7 +107,7 @@ def save_to_database(filename, raw_text, structured_data, model_type, file_size)
             filename,
             datetime.now().isoformat(),
             raw_text,
-            json.dumps(structured_data),  # Store as JSON string
+            json.dumps(structured_data),
             model_type,
             file_size
         ))
@@ -177,6 +195,42 @@ def prepare_csv_export():
         st.error(f"CSV preparation error: {e}")
         return None
 
+# Gemini AI chat functions
+def create_document_context(filename, raw_text, structured_data):
+    """Create a context string for the document to use with Gemini"""
+    context = f"""
+Document Information:
+- Filename: {filename}
+- Document Type: Financial Document
+
+Raw Text Content:
+{raw_text}
+
+Structured Data Extracted:
+{json.dumps(structured_data, indent=2)}
+
+You are an AI assistant that helps users understand and analyze financial documents. 
+The user has uploaded the document shown above. Please answer questions about this document 
+based on the content provided. Be helpful, accurate, and focus on the financial aspects.
+"""
+    return context
+
+def chat_with_gemini(user_message, document_context):
+    """Send message to Gemini AI with document context"""
+    try:
+        if not gemini_model:
+            return "Gemini AI is not available. Please check your API key."
+        
+        # Prepare the prompt with context
+        full_prompt = f"{document_context}\n\nUser Question: {user_message}\n\nPlease provide a helpful answer based on the document content above."
+        
+        # Generate response
+        response = gemini_model.generate_content(full_prompt)
+        return response.text
+    
+    except Exception as e:
+        return f"Error generating response: {str(e)}"
+
 # Function to validate file type
 def is_valid_file(file):
     """Check if uploaded file is a supported format"""
@@ -197,69 +251,43 @@ def get_content_type(filename):
     }
     return content_types.get(extension, 'application/octet-stream')
 
-# FIXED: Function to process document with Azure Document Intelligence
+# Azure processing function
 def process_document_with_azure(uploaded_file, model_type="Invoice"):
-    """
-    Process document using Azure Document Intelligence
-    Returns: (success, raw_text, structured_data, error_message)
-    """
+    """Process document using Azure Document Intelligence"""
     try:
-        # Reset file pointer to beginning
         uploaded_file.seek(0)
-        
-        # Read file content as bytes
         file_content = uploaded_file.read()
         
-        # Map user-friendly names to actual Azure model IDs
         model_mapping = {
             "Invoice": "prebuilt-invoice",
             "Receipt": "prebuilt-receipt", 
             "General Document": "prebuilt-read",
-            "Layout": "prebuilt-layout"
         }
         
-        # Use the mapped model or fallback to the original
         actual_model_id = model_mapping.get(model_type, "prebuilt-read")
         
-        st.info(f"Using Azure model: {actual_model_id}")
-        
-        # Call Azure Document Intelligence API
         poller = document_client.begin_analyze_document(
             model_id=actual_model_id,
             body=file_content,
             content_type=get_content_type(uploaded_file.name)
         )
         
-        # Get the result
         result = poller.result()
         
-        # Extract raw text (OCR) - IMPROVED
+        # Extract raw text
         raw_text = ""
         if hasattr(result, 'content') and result.content:
             raw_text = result.content
         
-        # Extract structured data - IMPROVED
+        # Extract structured data
         structured_data = {}
         
-        # Debug: Show what's in the result
-        st.write("**Debug Info:**")
-        st.write(f"Result type: {type(result)}")
-        st.write(f"Has documents: {hasattr(result, 'documents')}")
-        
         if hasattr(result, 'documents') and result.documents:
-            st.write(f"Number of documents: {len(result.documents)}")
             doc = result.documents[0]
-            st.write(f"Document fields available: {hasattr(doc, 'fields')}")
             
-            # Extract fields from the document
             if hasattr(doc, 'fields') and doc.fields:
-                st.write(f"Number of fields found: {len(doc.fields)}")
-                
                 for field_name, field_value in doc.fields.items():
-                    st.write(f"Field: {field_name}, Type: {type(field_value)}")
-                    
                     if field_value and hasattr(field_value, 'value') and field_value.value is not None:
-                        # Handle different field types
                         if hasattr(field_value, 'value_type'):
                             if field_value.value_type == "currency":
                                 if hasattr(field_value.value, 'amount') and hasattr(field_value.value, 'currency_code'):
@@ -276,22 +304,6 @@ def process_document_with_azure(uploaded_file, model_type="Invoice"):
                         else:
                             structured_data[field_name] = field_value.value
         
-        # Alternative: Extract from key-value pairs if documents don't have fields
-        if not structured_data and hasattr(result, 'key_value_pairs') and result.key_value_pairs:
-            st.write("Extracting from key-value pairs...")
-            for kv_pair in result.key_value_pairs:
-                if kv_pair.key and kv_pair.value:
-                    key_text = kv_pair.key.content if hasattr(kv_pair.key, 'content') else str(kv_pair.key)
-                    value_text = kv_pair.value.content if hasattr(kv_pair.value, 'content') else str(kv_pair.value)
-                    structured_data[key_text] = value_text
-        
-        # Alternative: Extract from tables if available
-        if not structured_data and hasattr(result, 'tables') and result.tables:
-            st.write("Extracting from tables...")
-            for i, table in enumerate(result.tables):
-                structured_data[f'Table_{i}_row_count'] = table.row_count
-                structured_data[f'Table_{i}_column_count'] = table.column_count
-        
         return True, raw_text, structured_data, None
         
     except AzureError as e:
@@ -299,7 +311,6 @@ def process_document_with_azure(uploaded_file, model_type="Invoice"):
     except Exception as e:
         return False, "", {}, f"Processing Error: {str(e)}"
 
-# Function to display structured data nicely
 def display_structured_data(data):
     """Display structured data in a nice format"""
     if not data:
@@ -308,10 +319,8 @@ def display_structured_data(data):
     
     st.subheader("📊 Extracted Key Information")
     
-    # Display all extracted fields
     for field_name, field_value in data.items():
         if isinstance(field_value, dict):
-            # Handle currency fields
             if 'value' in field_value and 'currency' in field_value:
                 st.write(f"• **{field_name}:** {field_value['value']} {field_value['currency']}")
             else:
@@ -319,7 +328,7 @@ def display_structured_data(data):
         else:
             st.write(f"• **{field_name}:** {field_value}")
 
-# Initialize database on startup
+# Initialize database
 if init_database():
     records_count = get_records_count()
 else:
@@ -328,27 +337,23 @@ else:
 # Main upload section
 st.header("📤 Upload Document")
 
-# Model selection
 model_type = st.selectbox(
     "Choose document type:",
     ["Invoice", "Receipt", "General Document"],
     help="Select the type of document you're uploading for better accuracy"
 )
 
-# File uploader
 uploaded_file = st.file_uploader(
     "Choose a financial document (PDF, JPG, PNG)",
     type=['pdf', 'jpg', 'jpeg', 'png'],
     help="Upload invoices, receipts, or other financial documents"
 )
 
-# Display file info if uploaded
+# Process uploaded file
 if uploaded_file is not None:
-    # Validate file
     if is_valid_file(uploaded_file):
         st.success(f"✅ File uploaded: {uploaded_file.name}")
         
-        # Show file details
         col1, col2, col3 = st.columns(3)
         with col1:
             st.write(f"**Filename:** {uploaded_file.name}")
@@ -357,7 +362,6 @@ if uploaded_file is not None:
         with col3:
             st.write(f"**Type:** {uploaded_file.type}")
         
-        # Show preview for images
         if uploaded_file.type.startswith('image/'):
             st.subheader("📸 Preview")
             st.image(uploaded_file, caption=uploaded_file.name, use_column_width=True)
@@ -366,7 +370,6 @@ if uploaded_file is not None:
         if st.button("🔍 Process Document", type="primary"):
             if document_client:
                 with st.spinner("Processing document with Azure AI... Please wait."):
-                    # Process the document
                     success, raw_text, structured_data, error_msg = process_document_with_azure(
                         uploaded_file, model_type
                     )
@@ -383,8 +386,16 @@ if uploaded_file is not None:
                             'file_size': uploaded_file.size
                         }
                         
-                        # Display results in tabs
-                        tab1, tab2 = st.tabs(["📊 Structured Data", "📝 Raw Text"])
+                        # Create document context for Gemini
+                        st.session_state.current_document_context = create_document_context(
+                            uploaded_file.name, raw_text, structured_data
+                        )
+                        
+                        # Clear previous chat history when new document is processed
+                        st.session_state.chat_history = []
+                        
+                        # Display results
+                        tab1, tab2, tab3 = st.tabs(["📊 Structured Data", "📝 Raw Text", "💬 Chat with Document"])
                         
                         with tab1:
                             display_structured_data(structured_data)
@@ -395,16 +406,64 @@ if uploaded_file is not None:
                                 st.text_area("Full text content:", raw_text, height=300)
                             else:
                                 st.warning("No text content extracted")
+                        
+                        with tab3:
+                            st.subheader("💬 Chat with Your Document")
+                            if gemini_model:
+                                st.info("Ask questions about your document! Examples: 'What is the total amount?', 'Who is the vendor?', 'What is the invoice date?'")
+                                
+                                # Chat interface placeholder
+                                st.write("Chat functionality is ready! Use the chat section below after processing.")
+                            else:
+                                st.error("Gemini AI not available. Please check your API key.")
                     
                     else:
                         st.error(f"❌ Processing failed: {error_msg}")
             else:
                 st.error("Azure client not available. Check your credentials.")
-    
     else:
         st.error("❌ Invalid file type. Please upload PDF, JPG, or PNG files only.")
 
-# Save to database section - FIXED
+# Chat Interface Section
+if st.session_state.current_document_context and gemini_model:
+    st.header("💬 Chat with Your Document")
+    
+    # Display chat history
+    for i, (question, answer) in enumerate(st.session_state.chat_history):
+        with st.container():
+            st.write(f"**🙋 You:** {question}")
+            st.write(f"**🤖 AI:** {answer}")
+            st.divider()
+    
+    # Chat input
+    user_question = st.text_input(
+        "Ask a question about your document:",
+        placeholder="e.g., What is the total amount? Who is the vendor?",
+        key="chat_input"
+    )
+    
+    col_ask, col_clear = st.columns([1, 4])
+    
+    with col_ask:
+        if st.button("Ask 🚀", type="primary"):
+            if user_question.strip():
+                with st.spinner("Thinking..."):
+                    response = chat_with_gemini(user_question, st.session_state.current_document_context)
+                    
+                    # Add to chat history
+                    st.session_state.chat_history.append((user_question, response))
+                    
+                    # Clear input and refresh
+                    st.rerun()
+            else:
+                st.warning("Please enter a question!")
+    
+    with col_clear:
+        if st.button("Clear Chat History"):
+            st.session_state.chat_history = []
+            st.rerun()
+
+# Save to database section
 if st.session_state.processing_result is not None:
     st.subheader("💾 Save Results")
     
@@ -425,12 +484,7 @@ if st.session_state.processing_result is not None:
             
             if save_success:
                 st.success(save_message)
-                # Clear the processing result after successful save
                 st.session_state.processing_result = None
-                # Force refresh by incrementing a counter
-                if 'refresh_counter' not in st.session_state:
-                    st.session_state.refresh_counter = 0
-                st.session_state.refresh_counter += 1
                 st.rerun()
             else:
                 st.error(save_message)
@@ -438,16 +492,14 @@ if st.session_state.processing_result is not None:
     with col_save2:
         st.info("Click 'Save to Database' to store these results for later reference and CSV export.")
 
-# Database section
+# Database section - FIXED CSV EXPORT
 st.header("🗄️ Stored Results")
 
-# Force refresh records count
 records_count = get_records_count()
 
 if records_count > 0:
     st.success(f"📊 Total stored documents: **{records_count}**")
     
-    # Create columns for view and export buttons
     col_view, col_export = st.columns(2)
     
     with col_view:
@@ -455,12 +507,9 @@ if records_count > 0:
             df = get_all_records()
             if not df.empty:
                 st.subheader("📋 All Processing Results")
-                
-                # Display simplified view
                 display_df = df[['id', 'filename', 'upload_timestamp', 'model_type', 'file_size']].copy()
                 display_df['upload_timestamp'] = pd.to_datetime(display_df['upload_timestamp']).dt.strftime('%Y-%m-%d %H:%M')
                 display_df['file_size'] = display_df['file_size'].apply(lambda x: f"{x} bytes")
-                
                 st.dataframe(display_df, use_container_width=True)
     
     with col_export:
@@ -496,36 +545,31 @@ if records_count > 0:
 else:
     st.info("🔍 No documents processed yet. Upload and process a document to see results here.")
 
-# Basic connection test
+# Sidebar
 if document_client:
     st.sidebar.success("✅ Azure Connected")
 else:
     st.sidebar.error("❌ Azure Disconnected")
 
-# Sidebar database info
+if gemini_model:
+    st.sidebar.success("✅ Gemini AI Connected")
+else:
+    st.sidebar.error("❌ Gemini AI Disconnected")
+
 st.sidebar.header("🗄️ Database Info")
 st.sidebar.write(f"📊 Stored Records: **{records_count}**")
 st.sidebar.write(f"💾 Database: `{DATABASE_NAME}`")
 
-# Export info in sidebar
-if records_count > 0:
-    st.sidebar.header("📥 Export Info")
-    st.sidebar.write("• Export includes all stored records")
-    st.sidebar.write("• Structured data is flattened")
-    st.sidebar.write("• Currency fields are separated")
-    st.sidebar.write("• Raw text is truncated for CSV")
+st.sidebar.header("🤖 AI Features")
+st.sidebar.write("• **Azure Document Intelligence** - OCR & Data Extraction")
+st.sidebar.write("• **Gemini AI** - Interactive Document Chat")
 
-# Sidebar info
-st.sidebar.header("🤖 AI Models")
-st.sidebar.write("• **Invoice** - For invoices and bills")
-st.sidebar.write("• **Receipt** - For receipts")
-st.sidebar.write("• **General Document** - OCR text extraction")
-
-st.sidebar.header("ℹ️ Supported Documents")
-st.sidebar.write("• Invoices")
-st.sidebar.write("• Receipts") 
-st.sidebar.write("• Financial statements")
-st.sidebar.write("• Bills")
+st.sidebar.header("💬 Chat Examples")
+st.sidebar.write("• What is the total amount?")
+st.sidebar.write("• Who is the vendor?")
+st.sidebar.write("• What is the invoice date?")
+st.sidebar.write("• Summarize this document")
+st.sidebar.write("• Find any discrepancies")
 
 st.sidebar.header("📋 Supported Formats")
 st.sidebar.write("• PDF")
