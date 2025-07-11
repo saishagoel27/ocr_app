@@ -30,7 +30,7 @@ A powerful web application that combines Azure Document Intelligence and Google 
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/saishagoel27/ocr_app
    cd financial-document-processor
    ```
 
