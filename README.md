@@ -31,7 +31,7 @@ A powerful web application that combines Azure Document Intelligence and Google 
 1. **Clone the repository**
    ```bash
    git clone https://github.com/saishagoel27/ocr_app
-   cd financial-document-processor
+   cd ocr_app
    ```
 
 2. **Create virtual environment**
