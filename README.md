@@ -65,7 +65,7 @@ The application will open in your browser at `http://localhost:8501`
 ## 📁 Project Structure
 
 ```
-financial-document-processor/
+ocr_app/
 ├── app.py                 # Main application file
 ├── .env                   # Environment variables (create this)
 ├── financial_docs.db     # SQLite database (auto-created)
