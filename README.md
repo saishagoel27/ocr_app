@@ -42,7 +42,7 @@ A powerful web application that combines Azure Document Intelligence and Google 
 
 3. **Install dependencies**
    ```bash
-   pip install streamlit db-sqlite3 pandas python-dotenv azure-ai-documentintelligence google-generativeai
+   pip install -r requirements.txt
    ```
 
 4. **Set up environment variables**
